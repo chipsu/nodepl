@@ -1,0 +1,90 @@
+#!/usr/bin/python
+#
+# TODO: Optimize remote commands
+# TODO: Custom public key
+# TODO: Remote user option
+# TODO: Triggers
+# TODO: Just add to authorized_keys, dont overwrite
+#
+
+import os, sys, commands, subprocess
+from os.path import expanduser
+
+execfile(sys.argv[1])
+
+def sys_exec(command):
+    print "exec:", command
+    return subprocess.call(command)
+
+def ssh_exec(host, command):
+    return sys_exec(['ssh', host, command])
+
+def rsync(src, dst, options):
+    return sys_exec(['rsync'] + options + [src, dst])
+
+public_key_file = open(expanduser("~") + '/.ssh/id_rsa.pub', 'r')
+public_key = public_key_file.read()
+public_key_file.close()
+
+init_script_template = """
+if [[ ! -f ~/.ssh/id_rsa ]]; then
+    ssh-keygen;
+fi;
+
+if ! type rsync; then
+    apt-get install rsync -y;
+fi;
+
+echo '{public_key}' > ~/.ssh/authorized_keys
+chmod u=rw,o=,g= ~/.ssh/id_rsa.pub
+
+"""
+
+for node_name in nodes:
+    node = nodes[node_name]
+    host = 'host' in node and node['host'] or node_name
+    ssh_host = 'root@' + host
+    print 'sync node:', ssh_host, '(' + node_name + ')'
+    print '    roles:', node['roles']
+    packages = {}
+    services = {}
+    filesystems = {}
+    for role_name in node['roles']:
+        role = roles[role_name]
+        if 'packages' in role:
+            packages.update(role['packages'])
+        if 'services' in role:
+            services.update(role['services'])
+        if 'filesystems' in role:
+            filesystems.update(role['filesystems'])
+    remote_commands = []
+    remote_commands.append(init_script_template.format(public_key = public_key))
+    for name in packages:
+        package = isinstance(packages[name], basestring) and {'status': packages[name]} or packages[name]
+        print '        package:', name, package['status']
+        remote_commands.append('echo apt-get ' + package['status'] + ' ' + name + ' -y')
+    for name in services:
+        service = isinstance(services[name], basestring) and {'status': services[name]} or services[name]
+        print '        service:', name, service['status']
+        remote_commands.append('echo service ' + name + ' ' + service['status'] + ' -y')
+    print '    execute remote commands'
+    ssh_exec(ssh_host, "\n".join(remote_commands))
+    print '    syncing files...'
+    for name in filesystems:
+        filesystem = isinstance(filesystems[name], basestring) and {'path': filesystems[name]} or filesystems[name]
+        path = filesystem['path']
+        source = 'source' in filesystem and filesystem['source'] or path
+        if os.path.isdir(source) and not source.endswith('/'):
+            source += '/'
+        options = ['-v']
+        print '        filesystem:', name, path
+        print '        sync:', path, 'from', source
+        if 'delete' in filesystem and filesystem['delete']:
+            options.append('--delete')
+        if 'recursive' in filesystem and filesystem['recursive']:
+            options.append('-a')
+        rsync(source, ssh_host + ':' + path, options)
+        if 'on_change' in filesystem and filesystem['on_change']:
+            # TODO: run only if something changed...
+            #ssh_exec(ssh_host, filesystem['on_change'])
+            pass
