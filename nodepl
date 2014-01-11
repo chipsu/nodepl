@@ -5,6 +5,7 @@
 # TODO: Remote user option
 # TODO: Triggers
 # TODO: Just add to authorized_keys, dont overwrite
+# TODO: Some config files should be uploaded before first apt-get upgrade
 #
 
 import os, sys, commands, subprocess
