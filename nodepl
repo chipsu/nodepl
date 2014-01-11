@@ -62,11 +62,11 @@ for node_name in nodes:
     for name in packages:
         package = isinstance(packages[name], basestring) and {'status': packages[name]} or packages[name]
         print '        package:', name, package['status']
-        remote_commands.append('echo apt-get ' + package['status'] + ' ' + name + ' -y')
+        remote_commands.append('apt-get ' + package['status'] + ' ' + name + ' -y')
     for name in services:
         service = isinstance(services[name], basestring) and {'status': services[name]} or services[name]
         print '        service:', name, service['status']
-        remote_commands.append('echo service ' + name + ' ' + service['status'])
+        remote_commands.append('service ' + name + ' ' + service['status'])
     print '    execute remote commands'
     ssh_exec(ssh_host, "\n".join(remote_commands))
     print '    syncing files...'
