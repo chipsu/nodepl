@@ -88,8 +88,7 @@ for node_name in nodes:
         rsync(source, ssh_host + ':' + path, options)
         if 'on_change' in filesystem and filesystem['on_change']:
             # TODO: run only if something changed...
-            #ssh_exec(ssh_host, filesystem['on_change'])
-            pass
+            ssh_exec(ssh_host, filesystem['on_change'])
     # make sure services are running if they depend on any changed files...
     print '    execute remote commands'
     ssh_exec(ssh_host, "\n".join(service_commands))
