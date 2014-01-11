@@ -66,7 +66,7 @@ for node_name in nodes:
     for name in services:
         service = isinstance(services[name], basestring) and {'status': services[name]} or services[name]
         print '        service:', name, service['status']
-        remote_commands.append('echo service ' + name + ' ' + service['status'] + ' -y')
+        remote_commands.append('echo service ' + name + ' ' + service['status'])
     print '    execute remote commands'
     ssh_exec(ssh_host, "\n".join(remote_commands))
     print '    syncing files...'
