@@ -32,7 +32,7 @@ if [[ ! -f ~/.ssh/id_rsa ]]; then
 fi;
 
 if ! type rsync; then
-    apt-get install rsync -y;
+    apt-get install rsync -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold";
 fi;
 
 echo '{public_key}' > ~/.ssh/authorized_keys
@@ -62,7 +62,7 @@ for node_name in nodes:
     for name in packages:
         package = isinstance(packages[name], basestring) and {'status': packages[name]} or packages[name]
         print '        package:', name, package['status']
-        remote_commands.append('apt-get ' + package['status'] + ' ' + name + ' -y')
+        remote_commands.append('apt-get ' + package['status'] + ' ' + name + ' -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"')
     for name in services:
         service = isinstance(services[name], basestring) and {'status': services[name]} or services[name]
         print '        service:', name, service['status']
