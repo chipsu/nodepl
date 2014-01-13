@@ -11,17 +11,77 @@
 import os, sys, commands, subprocess
 from os.path import expanduser
 
-execfile(sys.argv[1])
-
-def sys_exec(command):
-    print "exec:", command
-    return subprocess.call(command)
 
 def ssh_exec(host, command):
     return sys_exec(['ssh', host, command])
 
 def rsync(src, dst, options):
+    #sending incremental file list
+
     return sys_exec(['rsync'] + options + [src, dst])
+
+class nodepl:
+    stdout = None
+    stderr = None
+    returncode = None
+
+    def test(self):
+        self.log('ttesting')
+        return self.shell(['ls', '/', '-lh'])
+
+    def log(self, message):
+        print message
+
+    def shell(self, command, silent=False):
+        try:
+            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.stdout, self.stderr = process.communicate()
+            self.returncode = process.returncode
+            if self.returncode == 0:
+                return True
+            if not silent:
+                self.log('error: ' + str(self.returncode))
+                self.log(self.stderr)
+            return False
+        except Exception, ex:
+            print 'exception', ex
+            return False
+
+class nodepl_package(nodepl):
+    command = ['apt-get', '-y', '-o', 'Dpkg::Options::="--force-confdef"', '-o', 'Dpkg::Options::="--force-confold"']
+
+    def has(self, package):
+        return self.shell(['dpkg', '-s', package], silent=True)
+
+    def install(self, package):
+        if not self.has(package):
+            self.log('++ Installing package: ' + package)
+            return self.shell(self.command + [package, 'install'])
+        return None
+
+    def remove(self, package):
+        if self.has(package):
+            self.log('-- Removing package: ' + package)
+            return self.shell(self.command + [package, 'remove'])
+        return None
+
+    def upgrade(self):
+        self.log('** Upgrading packages')
+        return self.shell(self.command + ['update']) and self.shell(self.command + ['dist-upgrade'])
+
+    def add_key(self, keyfile, id):
+        #if(!sys_exec(['apt-key', 'list', '|', 'grep', id])):
+        #    sys_exec(['wget', '-O/tmp/dotdeb.gpg', 'http://www.dotdeb.org/dotdeb.gpg', && apt-key add /tmp/dotdeb.gpg && 
+        pass
+
+nodepl = nodepl_package()
+print nodepl.has('nginx')
+print nodepl.upgrade()
+
+exit(1)
+
+#execfile(sys.argv[1])
+
 
 public_key_file = open(expanduser("~") + '/.ssh/id_rsa.pub', 'r')
 public_key = public_key_file.read()
