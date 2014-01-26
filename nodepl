@@ -8,47 +8,150 @@
 # TODO: Some config files should be uploaded before first apt-get upgrade
 #
 
-import os, sys, commands, subprocess
+import os, sys, commands, subprocess, base64
 from os.path import expanduser
 
 
-def ssh_exec(host, command):
+def XXssh_exec(host, command):
     return sys_exec(['ssh', host, command])
 
-def rsync(src, dst, options):
-    #sending incremental file list
-
-    return sys_exec(['rsync'] + options + [src, dst])
+def XXrsync(src, dst, options):
+    return sys_exec(['rsync'] + ['--rsh', 'ssh -c arcfour'] + options + [src, dst])
 
 class nodepl:
     stdout = None
     stderr = None
     returncode = None
+    nodepl_path = '/usr/local/bin/nodepl'
 
     def test(self):
         self.log('ttesting')
         return self.shell(['ls', '/', '-lh'])
 
     def log(self, message):
-        print message
+        self.shell(['echo', message], popen=False)
 
-    def shell(self, command, silent=False):
+    def shell(self, command, silent=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, popen=True):
         try:
-            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            self.stdout, self.stderr = process.communicate()
-            self.returncode = process.returncode
+            if popen:
+                process = subprocess.Popen(command, stdout=stdout, stderr=stderr)
+                self.stdout, self.stderr = process.communicate()
+                self.returncode = process.returncode
+            else:
+                self.returncode = subprocess.call(command)
             if self.returncode == 0:
                 return True
             if not silent:
-                self.log('error: ' + str(self.returncode))
+                self.log('Error: Code=' + str(self.returncode) + ", popen=" + str(popen))
+                self.log("\n--- ".join(command))
                 self.log(self.stderr)
             return False
         except Exception, ex:
             print 'exception', ex
+            self.log("\n--- ".join(command))
             return False
 
+    def remote_shell(self, host, command, silent=False):
+        command = command.format(nodepl=self.nodepl_path)
+        return self.shell(['ssh', host, command], silent=silent, popen=False)
+
+    def rsync(self, src, dst, options):
+        return self.shell(['rsync'] + ['--rsh', 'ssh -c arcfour'] + options + [src, dst], popen=False)
+
+class nodepl_core(nodepl):
+
+    def push(self, config_file):
+        execfile(config_file)
+        roles = locals()['config']['roles']
+        nodes = locals()['config']['nodes']
+        nodepl_script_file = open(sys.argv[0])
+        nodepl_script = base64.b64encode(nodepl_script_file.read())
+        nodepl_script_file.close()
+        public_key_file = open(expanduser("~") + '/.ssh/id_rsa.pub', 'r')
+        public_key = public_key_file.read()
+        public_key_file.close()
+        init_script_template = """
+            echo '{nodepl_script}' | base64 -d > {nodepl}
+            chmod +x {nodepl}
+
+            if [[ ! -f ~/.ssh/id_rsa ]]; then
+                ssh-keygen;
+            fi;
+
+            echo '{public_key}' > ~/.ssh/authorized_keys
+            chmod u=rw,o=,g= ~/.ssh/id_rsa.pub
+
+            export DEBIAN_FRONTEND=noninteractive
+
+            if ! type rsync &>/dev/null; then
+                {nodepl} package install rsync
+            fi;
+
+            {nodepl} package upgrade
+        """
+
+        for node_name in nodes:
+            node = nodes[node_name]
+            host = 'host' in node and node['host'] or node_name
+            ssh_host = 'root@' + host
+            print 'sync node:', ssh_host, '(' + node_name + ')'
+            print '    roles:', node['roles']
+            packages = {}
+            services = {}
+            filesystems = {}
+            for role_name in node['roles']:
+                role = roles[role_name]
+                if 'packages' in role:
+                    packages.update(role['packages'])
+                if 'services' in role:
+                    services.update(role['services'])
+                if 'filesystems' in role:
+                    filesystems.update(role['filesystems'])
+            remote_commands = []
+            package_commands = []
+            service_commands = []
+            remote_commands.append(init_script_template.format(public_key = public_key, nodepl_script = nodepl_script, nodepl=self.nodepl_path))
+            for name in packages:
+                package = isinstance(packages[name], basestring) and {'status': packages[name]} or packages[name]
+                print '        package:', name, package['status']
+                package_commands.append('{nodepl} package ' + package['status'] + ' ' + name)
+            for name in services:
+                service = isinstance(services[name], basestring) and {'status': services[name]} or services[name]
+                print '        service:', name, service['status']
+                service_commands.append('{nodepl} service ' + service['status'] + ' ' + name)
+            print '    execute remote commands'
+            self.remote_shell(ssh_host, "\n".join(remote_commands + package_commands + service_commands))
+            remote_commands = []
+            print '    syncing files...'
+            for name in filesystems:
+                filesystem = isinstance(filesystems[name], basestring) and {'path': filesystems[name]} or filesystems[name]
+                path = filesystem['path']
+                source = 'source' in filesystem and filesystem['source'] or path
+                if os.path.isdir(source) and not source.endswith('/'):
+                    source += '/'
+                options = [
+                    '-v',
+                    #'--progress',
+                ]
+                print '        filesystem:', name, path
+                print '        sync:', path, 'from', source
+                if 'delete' in filesystem and filesystem['delete']:
+                    options.append('--delete')
+                if 'recursive' in filesystem and filesystem['recursive']:
+                    options.append('-a')
+                if self.rsync(source, ssh_host + ':' + path, options):
+                    if 'on_change' in filesystem and filesystem['on_change']:
+                        # TODO: run only if something changed...
+                        remote_commands.append(filesystem['on_change'])
+            # make sure services are running if they depend on any changed files...
+            print '    execute remote commands'
+            self.remote_shell(ssh_host, "\n".join(remote_commands + service_commands))
+
+        return True
+
 class nodepl_package(nodepl):
-    command = ['apt-get', '-y', '-o', 'Dpkg::Options::="--force-confdef"', '-o', 'Dpkg::Options::="--force-confold"']
+    command = ['apt-get', '-y']
+    # '-o', 'Dpkg::Options::="--force-confdef"', '-o', 'Dpkg::Options::="--force-confold"'
 
     def has(self, package):
         return self.shell(['dpkg', '-s', package], silent=True)
@@ -56,13 +159,13 @@ class nodepl_package(nodepl):
     def install(self, package):
         if not self.has(package):
             self.log('++ Installing package: ' + package)
-            return self.shell(self.command + [package, 'install'])
+            return self.shell(self.command + ['install', package])
         return None
 
     def remove(self, package):
         if self.has(package):
             self.log('-- Removing package: ' + package)
-            return self.shell(self.command + [package, 'remove'])
+            return self.shell(self.command + ['remove', package])
         return None
 
     def upgrade(self):
@@ -74,13 +177,53 @@ class nodepl_package(nodepl):
         #    sys_exec(['wget', '-O/tmp/dotdeb.gpg', 'http://www.dotdeb.org/dotdeb.gpg', && apt-key add /tmp/dotdeb.gpg && 
         pass
 
+
+class nodepl_service(nodepl):
+    command = ['service']
+
+    def status(self, service):
+        return self.shell(self.command + [service, 'status'], silent=True)
+
+    def is_running(self, service):
+        return self.status(service)
+
+    def is_installed(self, service):
+        return self.status(service) or not 'unrecognized' in self.stderr
+
+    def start(self, service):
+        if self.is_installed(service) and not self.is_running(service):
+            return self.shell(self.command + [service, 'start'])
+        return None
+
+    def stop(self, service):
+        if self.is_installed(service) and self.is_running(service):
+            return self.shell(self.command + [service, 'stop'])
+        return None
+
+    def reload(self, service):
+        if self.is_installed(service) and self.is_running(service):
+            return self.shell(self.command + [service, 'reload'])
+        return None
+
+name = globals()['nodepl_' + sys.argv[1]]
+method = getattr(name(), sys.argv[2])
+result = method(*sys.argv[3:])
+
+if result == False:
+    exit(1)
+
+exit(0)
+
 nodepl = nodepl_package()
 print nodepl.has('nginx')
 print nodepl.upgrade()
 
+
+
 exit(1)
 
-#execfile(sys.argv[1])
+#
+execfile(sys.argv[1])
 
 
 public_key_file = open(expanduser("~") + '/.ssh/id_rsa.pub', 'r')
