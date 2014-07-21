@@ -64,6 +64,7 @@ class nodepl_core(nodepl):
         execfile(config_file)
         roles = locals()['config']['roles']
         nodes = locals()['config']['nodes']
+        groups = locals()['config']['groups']
         nodepl_script_file = open(sys.argv[0])
         nodepl_script = base64.b64encode(nodepl_script_file.read())
         nodepl_script_file.close()
@@ -89,65 +90,71 @@ class nodepl_core(nodepl):
 
             {nodepl} package upgrade
         """
+        for group_name in groups:
+            group = groups[group_name]
+            for node_name in group['nodes']
+                self.run_node(node_name, group)
 
         for node_name in nodes:
-            node = nodes[node_name]
-            host = 'host' in node and node['host'] or node_name
-            ssh_host = 'root@' + host
-            print 'sync node:', ssh_host, '(' + node_name + ')'
-            print '    roles:', node['roles']
-            packages = {}
-            services = {}
-            files = {}
-            for role_name in node['roles']:
-                role = roles[role_name]
-                if 'packages' in role:
-                    packages.update(role['packages'])
-                if 'services' in role:
-                    services.update(role['services'])
-                if 'files' in role:
-                    files.update(role['files'])
-            remote_commands = []
-            package_commands = []
-            service_commands = []
-            remote_commands.append(init_script_template.format(public_key = public_key, nodepl_script = nodepl_script, nodepl=self.nodepl_path))
-            for name in packages:
-                package = isinstance(packages[name], basestring) and {'status': packages[name]} or packages[name]
-                print '        package:', name, package['status']
-                package_commands.append('{nodepl} package ' + package['status'] + ' ' + name)
-            for name in services:
-                service = isinstance(services[name], basestring) and {'status': services[name]} or services[name]
-                print '        service:', name, service['status']
-                service_commands.append('{nodepl} service ' + service['status'] + ' ' + name)
-            print '    execute remote commands'
-            self.remote_shell(ssh_host, "\n".join(remote_commands + package_commands + service_commands))
-            remote_commands = []
-            print '    syncing files...'
-            for name in files:
-                file_info = isinstance(files[name], basestring) and {'path': files[name]} or files[name]
-                path = file_info['path']
-                source = 'source' in file_info and file_info['source'] or path
-                if os.path.isdir(source) and not source.endswith('/'):
-                    source += '/'
-                options = [
-                    '-v',
-                    #'--progress',
-                ]
-                print '        file:', name, path
-                print '        sync:', path, 'from', source
-                if 'delete' in file_info and file_info['delete']:
-                    options.append('--delete')
-                if 'recursive' in file_info and file_info['recursive']:
-                    options.append('-a')
-                if self.rsync(source, ssh_host + ':' + path, options):
-                    if 'on_change' in file_info and file_info['on_change']:
-                        # TODO: run only if something changed...
-                        remote_commands.append(file_info['on_change'])
-            # make sure services are running if they depend on any changed files...
-            print '    execute remote commands'
-            self.remote_shell(ssh_host, "\n".join(remote_commands + service_commands))
+            self.run_node(node_name, nodes[node_name])
 
         return True
+
+    def run_node(self, node_name, node):
+        host = 'host' in node and node['host'] or node_name
+        ssh_host = 'root@' + host
+        print 'sync node:', ssh_host, '(' + node_name + ')'
+        print '    roles:', node['roles']
+        packages = {}
+        services = {}
+        files = {}
+        for role_name in node['roles']:
+            role = roles[role_name]
+            if 'packages' in role:
+                packages.update(role['packages'])
+            if 'services' in role:
+                services.update(role['services'])
+            if 'files' in role:
+                files.update(role['files'])
+        remote_commands = []
+        package_commands = []
+        service_commands = []
+        remote_commands.append(init_script_template.format(public_key = public_key, nodepl_script = nodepl_script, nodepl=self.nodepl_path))
+        for name in packages:
+            package = isinstance(packages[name], basestring) and {'status': packages[name]} or packages[name]
+            print '        package:', name, package['status']
+            package_commands.append('{nodepl} package ' + package['status'] + ' ' + name)
+        for name in services:
+            service = isinstance(services[name], basestring) and {'status': services[name]} or services[name]
+            print '        service:', name, service['status']
+            service_commands.append('{nodepl} service ' + service['status'] + ' ' + name)
+        print '    execute remote commands'
+        self.remote_shell(ssh_host, "\n".join(remote_commands + package_commands + service_commands))
+        remote_commands = []
+        print '    syncing files...'
+        for name in files:
+            file_info = isinstance(files[name], basestring) and {'path': files[name]} or files[name]
+            path = file_info['path']
+            source = 'source' in file_info and file_info['source'] or path
+            if os.path.isdir(source) and not source.endswith('/'):
+                source += '/'
+            options = [
+                '-v',
+                #'--progress',
+            ]
+            print '        file:', name, path
+            print '        sync:', path, 'from', source
+            if 'delete' in file_info and file_info['delete']:
+                options.append('--delete')
+            if 'recursive' in file_info and file_info['recursive']:
+                options.append('-a')
+            if self.rsync(source, ssh_host + ':' + path, options):
+                if 'on_change' in file_info and file_info['on_change']:
+                    # TODO: run only if something changed...
+                    remote_commands.append(file_info['on_change'])
+        # make sure services are running if they depend on any changed files...
+        print '    execute remote commands'
+        self.remote_shell(ssh_host, "\n".join(remote_commands + service_commands))
 
 class nodepl_package(nodepl):
     command = ['apt-get', '-y']
