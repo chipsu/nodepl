@@ -98,15 +98,15 @@ class nodepl_core(nodepl):
             print '    roles:', node['roles']
             packages = {}
             services = {}
-            filesystems = {}
+            files = {}
             for role_name in node['roles']:
                 role = roles[role_name]
                 if 'packages' in role:
                     packages.update(role['packages'])
                 if 'services' in role:
                     services.update(role['services'])
-                if 'filesystems' in role:
-                    filesystems.update(role['filesystems'])
+                if 'files' in role:
+                    files.update(role['files'])
             remote_commands = []
             package_commands = []
             service_commands = []
@@ -123,26 +123,26 @@ class nodepl_core(nodepl):
             self.remote_shell(ssh_host, "\n".join(remote_commands + package_commands + service_commands))
             remote_commands = []
             print '    syncing files...'
-            for name in filesystems:
-                filesystem = isinstance(filesystems[name], basestring) and {'path': filesystems[name]} or filesystems[name]
-                path = filesystem['path']
-                source = 'source' in filesystem and filesystem['source'] or path
+            for name in files:
+                file_info = isinstance(files[name], basestring) and {'path': files[name]} or files[name]
+                path = file_info['path']
+                source = 'source' in file_info and file_info['source'] or path
                 if os.path.isdir(source) and not source.endswith('/'):
                     source += '/'
                 options = [
                     '-v',
                     #'--progress',
                 ]
-                print '        filesystem:', name, path
+                print '        file:', name, path
                 print '        sync:', path, 'from', source
-                if 'delete' in filesystem and filesystem['delete']:
+                if 'delete' in file_info and file_info['delete']:
                     options.append('--delete')
-                if 'recursive' in filesystem and filesystem['recursive']:
+                if 'recursive' in file_info and file_info['recursive']:
                     options.append('-a')
                 if self.rsync(source, ssh_host + ':' + path, options):
-                    if 'on_change' in filesystem and filesystem['on_change']:
+                    if 'on_change' in file_info and file_info['on_change']:
                         # TODO: run only if something changed...
-                        remote_commands.append(filesystem['on_change'])
+                        remote_commands.append(file_info['on_change'])
             # make sure services are running if they depend on any changed files...
             print '    execute remote commands'
             self.remote_shell(ssh_host, "\n".join(remote_commands + service_commands))
@@ -252,15 +252,15 @@ for node_name in nodes:
     print '    roles:', node['roles']
     packages = {}
     services = {}
-    filesystems = {}
+    files = {}
     for role_name in node['roles']:
         role = roles[role_name]
         if 'packages' in role:
             packages.update(role['packages'])
         if 'services' in role:
             services.update(role['services'])
-        if 'filesystems' in role:
-            filesystems.update(role['filesystems'])
+        if 'files' in role:
+            files.update(role['files'])
     remote_commands = []
     package_commands = []
     service_commands = []
@@ -276,23 +276,23 @@ for node_name in nodes:
     print '    execute remote commands'
     ssh_exec(ssh_host, "\n".join(remote_commands + package_commands + service_commands))
     print '    syncing files...'
-    for name in filesystems:
-        filesystem = isinstance(filesystems[name], basestring) and {'path': filesystems[name]} or filesystems[name]
-        path = filesystem['path']
-        source = 'source' in filesystem and filesystem['source'] or path
+    for name in files:
+        file_info = isinstance(files[name], basestring) and {'path': files[name]} or files[name]
+        path = file_info['path']
+        source = 'source' in file_info and file_info['source'] or path
         if os.path.isdir(source) and not source.endswith('/'):
             source += '/'
         options = ['-v']
-        print '        filesystem:', name, path
+        print '        file_info:', name, path
         print '        sync:', path, 'from', source
-        if 'delete' in filesystem and filesystem['delete']:
+        if 'delete' in file_info and file_info['delete']:
             options.append('--delete')
-        if 'recursive' in filesystem and filesystem['recursive']:
+        if 'recursive' in file_info and file_info['recursive']:
             options.append('-a')
         rsync(source, ssh_host + ':' + path, options)
-        if 'on_change' in filesystem and filesystem['on_change']:
+        if 'on_change' in file_info and file_info['on_change']:
             # TODO: run only if something changed...
-            ssh_exec(ssh_host, filesystem['on_change'])
+            ssh_exec(ssh_host, file_info['on_change'])
     # make sure services are running if they depend on any changed files...
     print '    execute remote commands'
     ssh_exec(ssh_host, "\n".join(service_commands))
