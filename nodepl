@@ -62,9 +62,10 @@ class nodepl_core(nodepl):
 
     def push(self, config_file):
         execfile(config_file)
-        roles = locals()['config']['roles']
-        nodes = locals()['config']['nodes']
-        groups = locals()['config']['groups']
+        config = locals()['config']
+        roles = 'roles' in config and config['roles'] or {}
+        nodes = 'nodes' in config and config['nodes'] or {}
+        groups = 'groups' in config and config['groups'] or {}
         nodepl_script_file = open(sys.argv[0])
         nodepl_script = base64.b64encode(nodepl_script_file.read())
         nodepl_script_file.close()
