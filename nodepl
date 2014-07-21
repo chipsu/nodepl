@@ -66,12 +66,12 @@ class nodepl_core(nodepl):
         nodes = 'nodes' in locals()['config'] and locals()['config']['nodes'] or {}
         groups = 'groups' in locals()['config'] and locals()['config']['groups'] or {}
         nodepl_script_file = open(sys.argv[0])
-        nodepl_script = base64.b64encode(nodepl_script_file.read())
+        self.nodepl_script = base64.b64encode(nodepl_script_file.read())
         nodepl_script_file.close()
         public_key_file = open(expanduser("~") + '/.ssh/id_rsa.pub', 'r')
-        public_key = public_key_file.read()
+        self.public_key = public_key_file.read()
         public_key_file.close()
-        init_script_template = """
+        self.self.init_script_template = """
             echo '{nodepl_script}' | base64 -d > {nodepl}
             chmod +x {nodepl}
 
@@ -119,7 +119,7 @@ class nodepl_core(nodepl):
         remote_commands = []
         package_commands = []
         service_commands = []
-        remote_commands.append(init_script_template.format(public_key = public_key, nodepl_script = nodepl_script, nodepl=self.nodepl_path))
+        remote_commands.append(self.init_script_template.format(public_key = self.public_key, nodepl_script = self.nodepl_script, nodepl=self.nodepl_path))
         for name in packages:
             package = isinstance(packages[name], basestring) and {'status': packages[name]} or packages[name]
             print '        package:', name, package['status']
