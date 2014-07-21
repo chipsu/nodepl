@@ -92,7 +92,7 @@ class nodepl_core(nodepl):
         """
         for group_name in groups:
             group = groups[group_name]
-            for node_name in group['nodes']
+            for node_name in group['nodes']:
                 self.run_node(node_name, group)
 
         for node_name in nodes:
