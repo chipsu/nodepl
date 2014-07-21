@@ -71,7 +71,7 @@ class nodepl_core(nodepl):
         public_key_file = open(expanduser("~") + '/.ssh/id_rsa.pub', 'r')
         self.public_key = public_key_file.read()
         public_key_file.close()
-        self.self.init_script_template = """
+        self.init_script_template = """
             echo '{nodepl_script}' | base64 -d > {nodepl}
             chmod +x {nodepl}
 
