@@ -184,6 +184,7 @@ class nodepl_core(nodepl):
         # make sure services are running if they depend on any changed files...
         self.log_local('notice', '    execute remote commands')
         self.remote_shell(ssh_host, "\n".join(remote_commands + service_commands))
+        self.log_local('notice', '    done')
 
 class nodepl_package(nodepl):
     command = ['apt-get', '-y']
