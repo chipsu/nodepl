@@ -23,13 +23,37 @@ class nodepl:
     stderr = None
     returncode = None
     nodepl_path = '/usr/local/bin/nodepl'
+    colors = {
+        'debug': '\033[95m',
+        'notice': '\033[94m',
+        'success': '\033[92m',
+        'warning': '\033[93m',
+        'error': '\033[91m',
+    }
 
     def test(self):
-        self.log('ttesting')
+        self.log_notice('ttesting')
         return self.shell(['ls', '/', '-lh'])
 
-    def log(self, message):
+    def log(self, level, message):
+        if level in self.colors:
+            message = self.colors[level] + message + '\033[0m'
         self.shell(['echo', message], popen=False)
+
+    def log_debug(self, message):
+        self.log('debug', message)
+
+    def log_notice(self, message):
+        self.log('notice', message)
+
+    def log_success(self, message):
+        self.log('success', message)
+
+    def log_warning(self, message):
+        self.log('warning', message)
+
+    def log_error(self, message):
+        self.log('error', message)
 
     def shell(self, command, silent=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, popen=True):
         try:
@@ -42,13 +66,13 @@ class nodepl:
             if self.returncode == 0:
                 return True
             if not silent:
-                self.log('Error: Code=' + str(self.returncode) + ", popen=" + str(popen))
-                self.log("\n--- ".join(command))
-                self.log(self.stderr)
+                self.log_error('Error: Code=' + str(self.returncode) + ", popen=" + str(popen))
+                self.log_error("\n--- ".join(command))
+                self.log_error(self.stderr)
             return False
         except Exception, ex:
-            print 'exception', ex
-            self.log("\n--- ".join(command))
+            self.log_local('error', 'exception: ' + str(ex))
+            self.log_debug("\n--- ".join(command))
             return False
 
     def remote_shell(self, host, command, silent=False):
@@ -57,6 +81,11 @@ class nodepl:
 
     def rsync(self, src, dst, options):
         return self.shell(['rsync'] + ['--rsh', 'ssh -c arcfour'] + options + [src, dst], popen=False)
+
+    def log_local(self, level, message):
+        if level in self.colors:
+            message = self.colors[level] + message + '\033[0m'
+        print message
 
 class nodepl_core(nodepl):
 
@@ -103,8 +132,8 @@ class nodepl_core(nodepl):
     def run_node(self, node_name, node):
         host = 'host' in node and node['host'] or node_name
         ssh_host = 'root@' + host
-        print 'sync node:', ssh_host, '(' + node_name + ')'
-        print '    roles:', node['roles']
+        self.log_local('notice', 'sync node: ' + ssh_host + ' (' + node_name + ')')
+        self.log_local('debug', '    roles: ' + ' '.join(node['roles']))
         packages = {}
         services = {}
         files = {}
@@ -122,16 +151,16 @@ class nodepl_core(nodepl):
         remote_commands.append(self.init_script_template.format(public_key = self.public_key, nodepl_script = self.nodepl_script, nodepl=self.nodepl_path))
         for name in packages:
             package = isinstance(packages[name], basestring) and {'status': packages[name]} or packages[name]
-            print '        package:', name, package['status']
+            self.log_local('notice', '        package: ' + name + ' ' + package['status'])
             package_commands.append('{nodepl} package ' + package['status'] + ' ' + name)
         for name in services:
             service = isinstance(services[name], basestring) and {'status': services[name]} or services[name]
-            print '        service:', name, service['status']
+            self.log_local('notice', '        service: ' + name + ' ' + service['status'])
             service_commands.append('{nodepl} service ' + service['status'] + ' ' + name)
-        print '    execute remote commands'
+        self.log_local('notice', '    execute remote commands')
         self.remote_shell(ssh_host, "\n".join(remote_commands + package_commands + service_commands))
         remote_commands = []
-        print '    syncing files...'
+        self.log_local('notice', '    syncing files...')
         for name in files:
             file_info = isinstance(files[name], basestring) and {'path': files[name]} or files[name]
             path = file_info['path']
@@ -142,8 +171,8 @@ class nodepl_core(nodepl):
                 '-v',
                 #'--progress',
             ]
-            print '        file:', name, path
-            print '        sync:', path, 'from', source
+            self.log_local('notice', '        file: ' + name + ' ' + path)
+            self.log_local('notice', '        sync: ' + path + ' from ' + source)
             if 'delete' in file_info and file_info['delete']:
                 options.append('--delete')
             if 'recursive' in file_info and file_info['recursive']:
@@ -153,7 +182,7 @@ class nodepl_core(nodepl):
                     # TODO: run only if something changed...
                     remote_commands.append(file_info['on_change'])
         # make sure services are running if they depend on any changed files...
-        print '    execute remote commands'
+        self.log_local('notice', '    execute remote commands')
         self.remote_shell(ssh_host, "\n".join(remote_commands + service_commands))
 
 class nodepl_package(nodepl):
@@ -165,18 +194,18 @@ class nodepl_package(nodepl):
 
     def install(self, package):
         if not self.has(package):
-            self.log('++ Installing package: ' + package)
+            self.log_notice('++ Installing package: ' + package)
             return self.shell(self.command + ['install', package])
         return None
 
     def remove(self, package):
         if self.has(package):
-            self.log('-- Removing package: ' + package)
+            self.log_warning('-- Removing package: ' + package)
             return self.shell(self.command + ['remove', package])
         return None
 
     def upgrade(self):
-        self.log('** Upgrading packages')
+        self.log_notice('** Upgrading packages')
         return self.shell(self.command + ['update']) and self.shell(self.command + ['dist-upgrade'])
 
     def add_key(self, keyfile, id):
