@@ -1,16 +1,15 @@
 #!/usr/bin/python
 #
+# TODO: Config URL
 # TODO: Optimize remote commands
 # TODO: Custom public key
 # TODO: Remote user option
 # TODO: Triggers
 # TODO: Just add to authorized_keys, dont overwrite
 # TODO: Some config files should be uploaded before first apt-get upgrade
-#
 
-import os, sys, commands, subprocess, base64
+import os, sys, commands, subprocess, base64, errno
 from os.path import expanduser
-
 
 def XXssh_exec(host, command):
     return sys_exec(['ssh', host, command])
@@ -19,6 +18,7 @@ def XXrsync(src, dst, options):
     return sys_exec(['rsync'] + ['--rsh', 'ssh -c arcfour'] + options + [src, dst])
 
 class nodepl:
+    home = expanduser('~')
     stdout = None
     stderr = None
     returncode = None
@@ -30,6 +30,28 @@ class nodepl:
         'warning': '\033[93m',
         'error': '\033[91m',
     }
+
+    def __init__(self, options = {}):
+        self.options = options
+
+    def load_config(self, filename, defaults = {}, options_prefix = False):
+        if not os.path.isfile(filename):
+            print 'Config file not found: ' + filename
+            exit(1)
+        execfile(filename)
+        config = defaults.copy()
+        config.update(locals()['config'])
+        if options_prefix:
+            for key in self.options:
+                if key.startswith(options_prefix):
+                    config[key[len(options_prefix):]] = self.options[key]
+        return config
+
+    def array_get(self, array, key, default = False):
+        return key in array and array[key] or default
+
+    def get_option(self, key, default = False):
+        return self.array_get(self.options, key, default)
 
     def test(self):
         self.log_notice('ttesting')
@@ -87,46 +109,77 @@ class nodepl:
             message = self.colors[level] + message + '\033[0m'
         print message
 
-class nodepl_core(nodepl):
+class nodepl_client(nodepl):
 
-    def push(self, config_file):
-        execfile(config_file)
-        self.roles = 'roles' in locals()['config'] and locals()['config']['roles'] or {}
-        nodes = 'nodes' in locals()['config'] and locals()['config']['nodes'] or {}
-        groups = 'groups' in locals()['config'] and locals()['config']['groups'] or {}
-        nodepl_script_file = open(sys.argv[0])
-        self.nodepl_script = base64.b64encode(nodepl_script_file.read())
-        nodepl_script_file.close()
-        public_key_file = open(expanduser("~") + '/.ssh/id_rsa.pub', 'r')
-        self.public_key = public_key_file.read()
-        public_key_file.close()
-        self.init_script_template = """
-            echo '{nodepl_script}' | base64 -d > {nodepl}
-            chmod +x {nodepl}
+    def __init__(self, options = {}):
+        self.options = options
+        defaults = {
+            'roles': {},
+            'nodes': {},
+            'groups': {},
+            'public-key': self.home + '/.ssh/id_rsa.pub',
+            'init-script-template': """
+                echo '{nodepl_script}' | base64 -d > {nodepl}
+                chmod +x {nodepl}
 
-            if [[ ! -f ~/.ssh/id_rsa ]]; then
-                ssh-keygen;
-            fi;
+                if [[ ! -f ~/.ssh/id_rsa ]]; then
+                    ssh-keygen;
+                fi;
 
-            echo '{public_key}' > ~/.ssh/authorized_keys
-            chmod u=rw,o=,g= ~/.ssh/id_rsa.pub
+                echo '{public_key}' > ~/.ssh/authorized_keys
+                chmod u=rw,o=,g= ~/.ssh/id_rsa.pub
 
-            export DEBIAN_FRONTEND=noninteractive
+                export DEBIAN_FRONTEND=noninteractive
 
-            if ! type rsync &>/dev/null; then
-                {nodepl} package install rsync
-            fi;
+                if ! type rsyncinit_script_template &>/dev/null; then
+                    {nodepl} package install rsync
+                fi;
 
-            {nodepl} package upgrade
-        """
-        for group_name in groups:
-            group = groups[group_name]
+                {nodepl} package upgrade
+            """
+        }
+        config_file = self.find_config('client')
+        self.client = self.load_config(config_file, defaults, 'client-')
+        self.nodepl_script = self.encode_script(sys.argv[0])
+        self.public_key = self.load_file(self.client['public-key'])
+
+    def load_file(self, filename):
+        handle = open(filename, 'r')
+        result = handle.read()
+        handle.close()
+        return result
+
+    def encode_script(self, filename):
+        handle = open(filename)
+        result = base64.b64encode(handle.read())
+        handle.close()
+        return result
+
+    def find_config(self, name):
+        key = '-'
+        if name + '-config' in self.options:
+            return self.options[name + '-config']
+        else:
+            files = [
+                self.home + '/.nodepl/nodepl-' + name + '.conf',
+                '/etc/nodepl-' + name + '.conf'
+            ]
+            for filename in files:
+                if os.path.isfile(filename):
+                    return filename
+        print 'Config file not found for: ' + name
+        exit(1)
+
+class nodepl_core(nodepl_client):
+
+    def push(self):
+        for group_name in self.client['groups']:
+            group = self.client['groups'][group_name]
             for node_name in group['nodes']:
-                self.run_node(node_name, group)
-
-        for node_name in nodes:
-            self.run_node(node_name, nodes[node_name])
-
+                node = group.clone()
+                if node_name in self.client['nodes']:
+                    node.update(self.client['nodes'])
+                self.run_node(node_name, node)
         return True
 
     def run_node(self, node_name, node):
@@ -138,7 +191,7 @@ class nodepl_core(nodepl):
         services = {}
         files = {}
         for role_name in node['roles']:
-            role = self.roles[role_name]
+            role = self.client['roles'][role_name]
             if 'packages' in role:
                 packages.update(role['packages'])
             if 'services' in role:
@@ -148,7 +201,12 @@ class nodepl_core(nodepl):
         remote_commands = []
         package_commands = []
         service_commands = []
-        remote_commands.append(self.init_script_template.format(public_key = self.public_key, nodepl_script = self.nodepl_script, nodepl=self.nodepl_path))
+        nodepl_path = self.array_get(node, 'nodepl-path', self.nodepl_path)
+        remote_commands.append(self.client['init-script-template'].format(
+            public_key = self.public_key,
+            nodepl_script = self.nodepl_script,
+            nodepl = nodepl_path
+        ))
         for name in packages:
             package = isinstance(packages[name], basestring) and {'status': packages[name]} or packages[name]
             self.log_local('notice', '        package: ' + name + ' ' + package['status'])
@@ -186,6 +244,14 @@ class nodepl_core(nodepl):
         self.remote_shell(ssh_host, "\n".join(remote_commands + service_commands))
         self.log_local('notice', '    done')
 
+    # ssh to one or multiple remotes
+    def ssh(self):
+        self.log_local('error', 'fix')
+
+    # run a single command on one or more remotes
+    def cmd(self):
+        self.log_local('error', 'fix')
+
 class nodepl_package(nodepl):
     command = ['apt-get', '-y']
     # '-o', 'Dpkg::Options::="--force-confdef"', '-o', 'Dpkg::Options::="--force-confold"'
@@ -211,7 +277,7 @@ class nodepl_package(nodepl):
 
     def add_key(self, keyfile, id):
         #if(!sys_exec(['apt-key', 'list', '|', 'grep', id])):
-        #    sys_exec(['wget', '-O/tmp/dotdeb.gpg', 'http://www.dotdeb.org/dotdeb.gpg', && apt-key add /tmp/dotdeb.gpg && 
+        #    sys_exec(['wget', '-O/tmp/dotdeb.gpg', 'http://www.dotdeb.org/dotdeb.gpg', && apt-key add /tmp/dotdeb.gpg &&
         pass
 
 
@@ -242,94 +308,122 @@ class nodepl_service(nodepl):
             return self.shell(self.command + [service, 'reload'])
         return None
 
-name = globals()['nodepl_' + sys.argv[1]]
-method = getattr(name(), sys.argv[2])
-result = method(*sys.argv[3:])
+class nodepl_deploy(nodepl_client):
+
+    def __init__(self, options):
+        nodepl_client.__init__(self, options)
+        default_config = {
+            'path': '/var/www',
+            'storage': '/var/lib/nodepl/deploy',
+            'user': 'deploy'
+        }
+        for node in self.client['nodes']:
+            node = self.client['nodes'][node]
+            config = 'deploy' in node and node['deploy'] or {}
+            config.update(default_config)
+            node['deploy'] = config
+        self.detect_project()
+
+    def detect_project(self):
+        self.log_local('notice', 'detecting project')
+        self.project_path = self.get_option('project-path', '.')
+        if not os.path.isdir(self.project_path):
+            self.log_local('error', 'project path does not exist')
+            exit(1)
+        if not os.path.isdir(self.project_path + '/.git'):
+            self.log_local('error', 'project path is not a git project')
+            exit(1)
+        self.project_config_file = self.get_option('project-config', self.project_path + '/.nodepl-deploy.conf')
+        self.project = {
+            'name': os.path.basename(os.path.realpath(self.project_path)),
+            'target': 'www',
+            'cache-path': expanduser('~') + '/.nodepl/deploy-cache'
+        }
+        self.project = self.load_config(self.project_config_file, self.project, 'project-')
+        if not os.path.isdir(self.project['cache-path']):
+            os.makedirs(self.project['cache-path'])
+        self.shell('git rev-parse --verify HEAD'.split(' '))
+        self.project_version = self.stdout.split("\n")[0]
+        self.cache_path = self.project['cache-path'] + '/' + self.project['name'] + '/' + self.project_version
+        if not os.path.exists(self.cache_path):
+            os.makedirs(self.cache_path)
+        self.log_local('notice', '  name: ' + self.project['name'])
+        self.log_local('notice', '  latest version: ' + self.project_version)
+
+    def build(self, version = False):
+        if version == False:
+            version = self.project_version
+        self.log_local('notice', 'build ' + version)
+        if not 'nocache' in self.options and self.remote_version_exists(version):
+            self.log_local('notice', 'version exists on server')
+            return
+        self.log_local('notice', 'building cache')
+        subprocess.call(['git', 'checkout-index', '-a', '-f', '--prefix', self.cache_path + '/'])
+        subprocess.call(['du', '-hs', self.cache_path])
+        self.log_local('notice', 'cache complete')
+
+    def get_nodes(self):
+        if self.project['target'] in self.client['groups']:
+            return self.client['groups'][self.project['target']]['nodes']
+        return [self.project['target']]
+
+    def run(self, version = False):
+        nodes = self.get_nodes()
+        self.log_local('notice', 'begin deployment to '+ self.project['target'])
+        self.log_local('notice', '  affected nodes are: ' + ' '.join(nodes))
+        self.build(version)
+        self.sync(version)
+        self.deploy(version)
+        self.log_local('notice', 'done')
+
+    # @todo Triggers (copy assets, db and other things)
+    def sync(self, version):
+        self.log_local('error', 'fix fix fix: sync(self, version):')
+        # rsync self.cache_path remote_path + hash
+
+    # @todo Sync deployment with other nodes
+    def deploy(self, version):
+        self.log_local('error', 'fix fix fix: deploy(self, version):')
+        # symlink new version
+
+    def status(self):
+        nodes = self.get_nodes()
+        self.log_local('notice', 'fetching deployment status from '+ self.project['target'])
+        self.log_local('notice', '  affected nodes are: ' + ' '.join(nodes))
+        if True:
+            self.log_local('error', 'this project is not deployed on any known servers')
+        self.log_local('notice', 'done')
+
+    def log(self):
+        nodes = self.get_nodes()
+        self.log_local('notice', 'fetching deployment log from '+ self.project['target'])
+        self.log_local('notice', '  affected nodes are: ' + ' '.join(nodes))
+        self.log_local('notice', 'done')
+
+    def remote_version_exists(self, target):
+        return False
+
+options = {}
+args = []
+
+i = 1
+while i < len(sys.argv):
+    if i + 1 < len(sys.argv) and sys.argv[i].startswith('--'):
+        options[sys.argv[i][2:]] = sys.argv[i + 1]
+        i = i + 1
+    else:
+        args.append(sys.argv[i])
+    i = i + 1
+
+if len(args) < 2:
+    print 'nodepl <module> <method> [args] [--options]'
+    exit(1)
+
+name = globals()['nodepl_' + args[0]]
+method = getattr(name(options), args[1])
+result = method(*args[2:])
 
 if result == False:
     exit(1)
 
 exit(0)
-
-nodepl = nodepl_package()
-print nodepl.has('nginx')
-print nodepl.upgrade()
-
-
-
-exit(1)
-
-#
-execfile(sys.argv[1])
-
-
-public_key_file = open(expanduser("~") + '/.ssh/id_rsa.pub', 'r')
-public_key = public_key_file.read()
-public_key_file.close()
-
-init_script_template = """
-if [[ ! -f ~/.ssh/id_rsa ]]; then
-    ssh-keygen;
-fi;
-
-if ! type rsync; then
-    apt-get install rsync -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold";
-fi;
-
-echo '{public_key}' > ~/.ssh/authorized_keys
-chmod u=rw,o=,g= ~/.ssh/id_rsa.pub
-
-"""
-
-for node_name in nodes:
-    node = nodes[node_name]
-    host = 'host' in node and node['host'] or node_name
-    ssh_host = 'root@' + host
-    print 'sync node:', ssh_host, '(' + node_name + ')'
-    print '    roles:', node['roles']
-    packages = {}
-    services = {}
-    files = {}
-    for role_name in node['roles']:
-        role = roles[role_name]
-        if 'packages' in role:
-            packages.update(role['packages'])
-        if 'services' in role:
-            services.update(role['services'])
-        if 'files' in role:
-            files.update(role['files'])
-    remote_commands = []
-    package_commands = []
-    service_commands = []
-    remote_commands.append(init_script_template.format(public_key = public_key))
-    for name in packages:
-        package = isinstance(packages[name], basestring) and {'status': packages[name]} or packages[name]
-        print '        package:', name, package['status']
-        package_commands.append('apt-get ' + package['status'] + ' ' + name + ' -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"')
-    for name in services:
-        service = isinstance(services[name], basestring) and {'status': services[name]} or services[name]
-        print '        service:', name, service['status']
-        service_commands.append('service ' + name + ' ' + service['status'])
-    print '    execute remote commands'
-    ssh_exec(ssh_host, "\n".join(remote_commands + package_commands + service_commands))
-    print '    syncing files...'
-    for name in files:
-        file_info = isinstance(files[name], basestring) and {'path': files[name]} or files[name]
-        path = file_info['path']
-        source = 'source' in file_info and file_info['source'] or path
-        if os.path.isdir(source) and not source.endswith('/'):
-            source += '/'
-        options = ['-v']
-        print '        file_info:', name, path
-        print '        sync:', path, 'from', source
-        if 'delete' in file_info and file_info['delete']:
-            options.append('--delete')
-        if 'recursive' in file_info and file_info['recursive']:
-            options.append('-a')
-        rsync(source, ssh_host + ':' + path, options)
-        if 'on_change' in file_info and file_info['on_change']:
-            # TODO: run only if something changed...
-            ssh_exec(ssh_host, file_info['on_change'])
-    # make sure services are running if they depend on any changed files...
-    print '    execute remote commands'
-    ssh_exec(ssh_host, "\n".join(service_commands))
