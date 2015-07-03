@@ -130,14 +130,18 @@ class nodepl_client(nodepl):
             'groups': {},
             'public-key': self.home + '/.ssh/id_rsa.pub',
             'init-script-template': """
-                nodepl={nodepl_path}
-                sudo=
+                nodepl="{nodepl_path}"
+                nodepl_path="{nodepl_path}"
+                nodepl_sudo=
+                nodepl_debug={nodepl_debug}
 
                 if [[ $EUID -ne 0 ]]; then
                     if sudo -n true 2>/dev/null; then
-                        echo "passwordless sudo detected"
-                        sudo=sudo
-                        nodepl="$sudo $nodepl"
+                        if [[ $nodepl_debug == True ]]; then
+                            echo "passwordless sudo detected"
+                        fi
+                        nodepl_sudo=sudo
+                        nodepl="$nodepl_sudo $nodepl"
                     else
                         echo "This script must be run as root"
                         echo "Enable passwordless sudo for this user? (Y/n)"
@@ -161,36 +165,43 @@ class nodepl_client(nodepl):
                     fi
                 fi
 
-                echo "sudo is $sudo"
-                echo "nodepl is $nodepl"
+                if [[ $nodepl_debug == True ]]; then
+                    echo "nodepl is $nodepl"
+                    echo "nodepl_sudo is $nodepl_sudo"
+                    echo "nodepl_path is $nodepl_path"
+                fi
 
                 if [[ ! -f ~/.ssh/id_rsa ]]; then
                     ssh-keygen;
                 fi;
 
                 echo '{public_key}' > ~/.ssh/authorized_keys
-                $sudo chmod u=rw,o=,g= ~/.ssh/id_rsa.pub
+                $nodepl_sudo chmod u=rw,o=,g= ~/.ssh/id_rsa.pub
 
-                type python
+                type python >/dev/null
 
                 if [[ $? != 0 ]]; then
                     echo "Installing python"
-                    $sudo apt-get install python || exit 1
+                    $nodepl_sudo apt-get install python
+                    if [[ $? != 0 ]]; then
+                        echo "install failed, maybe package manager is busy? try again!"
+                        exit 1
+                    fi
                 fi
 
                 tmp="$(mktemp)"
                 echo '{nodepl_script}' | base64 -d > "$tmp"
 
-                $sudo cp "$tmp" {nodepl_path} || exit 1
+                $nodepl_sudo cp "$tmp" {nodepl_path} || exit 1
 
                 if [[ ! -f "{nodepl_path}" ]]; then
                     echo "{nodepl_path} not found"
                     exit 1
                 fi
 
-                $sudo chmod +x {nodepl_path} || exit 1
+                $nodepl_sudo chmod +x {nodepl_path} || exit 1
 
-                $nodepl init test || exit 1
+                $nodepl init test >/dev/null || exit 1
 
                 export DEBIAN_FRONTEND=noninteractive
 
@@ -275,12 +286,15 @@ class nodepl_core(nodepl_client):
         package_commands = []
         service_commands = []
         nodepl_path = self.array_get(node, 'nodepl-path', self.nodepl_path)
-        remote_commands.append(self.client['init-script-template'].format(
+        init_script = self.client['init-script-template'].format(
             public_key = self.public_key,
             nodepl_script = self.nodepl_script,
-            nodepl_path = nodepl_path
-        ))
-        remote_commands.append('$nodepl package upgrade')
+            nodepl_path = nodepl_path,
+            nodepl_debug = self.get_option('debug')
+        )
+        remote_commands.append(init_script)
+        if not self.get_option('quick'):
+            remote_commands.append('$nodepl package upgrade')
         for name in packages:
             package = isinstance(packages[name], basestring) and {'status': packages[name]} or packages[name]
             self.log_local('notice', '        package: ' + name + ' ' + package['status'])
@@ -293,6 +307,7 @@ class nodepl_core(nodepl_client):
         if not self.remote_shell(ssh_host, "\n".join(remote_commands + package_commands + service_commands)):
             return False
         remote_commands = []
+        remote_commands.append(init_script)
         self.log_local('notice', '    syncing files...')
         for name in files:
             file_info = isinstance(files[name], basestring) and {'path': files[name]} or files[name]
@@ -361,28 +376,32 @@ class nodepl_service(nodepl):
     command = ['service']
 
     def status(self, service):
-        return self.shell(self.command + [service, 'status'], silent=True)
+        assert len(service)
+        return self.get_status(service, silent=False)
+
+    def get_status(self, service, silent=True):
+        return self.shell(self.command + [service, 'status'], silent=silent)
 
     def is_running(self, service):
-        return self.status(service)
+        return self.get_status(service)
 
     def is_installed(self, service):
-        return self.status(service) or not 'unrecognized' in self.stderr
+        return self.get_status(service) or not 'unrecognized' in self.stderr
 
     def start(self, service):
-        print self.command
-        print service
+        assert len(service)
         if self.is_installed(service) and not self.is_running(service):
-            print ":P::: " + service + 'start'
             return self.shell(self.command + [service, 'start'])
         return None
 
     def stop(self, service):
+        assert len(service)
         if self.is_installed(service) and self.is_running(service):
             return self.shell(self.command + [service, 'stop'])
         return None
 
     def reload(self, service):
+        assert len(service)
         if self.is_installed(service) and self.is_running(service):
             return self.shell(self.command + [service, 'reload'])
         return None
@@ -490,14 +509,12 @@ class nodepl_init(nodepl):
 options = {}
 args = []
 
-i = 1
-while i < len(sys.argv):
-    if i + 1 < len(sys.argv) and sys.argv[i].startswith('--'):
-        options[sys.argv[i][2:]] = sys.argv[i + 1]
-        i = i + 1
+for arg in sys.argv[1:]:
+    if arg.startswith('--'):
+        arg = arg[2:].split('=', 1)
+        options[arg[0]] = len(arg) == 2 and arg[1] or True
     else:
-        args.append(sys.argv[i])
-    i = i + 1
+        args.append(arg)
 
 if len(args) < 2:
     print 'nodepl <module> <method> [args] [--options]'
