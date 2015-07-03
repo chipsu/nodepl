@@ -38,9 +38,11 @@ class nodepl:
         if not os.path.isfile(filename):
             print 'Config file not found: ' + filename
             exit(1)
-        execfile(filename)
-        config = defaults.copy()
-        config.update(locals()['config'])
+        script_locals = {}
+        execfile(filename, {}, script_locals)
+        merge = defaults.copy()
+        merge.update(script_locals['config'])
+        config = merge
         if options_prefix:
             for key in self.options:
                 if key.startswith(options_prefix):
@@ -77,6 +79,12 @@ class nodepl:
     def log_error(self, message):
         self.log('error', message)
 
+    def log_failed_command(self, command):
+        logfile = '/tmp/nodepl-command.log'
+        with open(logfile, 'a') as handle:
+            handle.write("\n--- ".join(command))
+        self.log_error('see ' + logfile + ' for details')
+
     def shell(self, command, silent=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, popen=True):
         try:
             if popen:
@@ -89,17 +97,20 @@ class nodepl:
                 return True
             if not silent:
                 self.log_error('Error: Code=' + str(self.returncode) + ", popen=" + str(popen))
-                self.log_error("\n--- ".join(command))
-                self.log_error(self.stderr)
+                self.log_failed_command(command)
+                if self.stderr != None:
+                    self.log_error(self.stderr)
+                else:
+                    self.log_error('stderr empty')
             return False
         except Exception, ex:
             self.log_local('error', 'exception: ' + str(ex))
-            self.log_debug("\n--- ".join(command))
+            self.log_failed_command(command)
             return False
 
     def remote_shell(self, host, command, silent=False):
         command = command.format(nodepl=self.nodepl_path)
-        return self.shell(['ssh', host, command], silent=silent, popen=False)
+        return self.shell(['ssh', '-t', host, command], silent=silent, popen=False)
 
     def rsync(self, src, dst, options):
         return self.shell(['rsync'] + ['--rsh', 'ssh -c arcfour'] + options + [src, dst], popen=False)
@@ -119,23 +130,73 @@ class nodepl_client(nodepl):
             'groups': {},
             'public-key': self.home + '/.ssh/id_rsa.pub',
             'init-script-template': """
-                echo '{nodepl_script}' | base64 -d > {nodepl}
-                chmod +x {nodepl}
+                nodepl={nodepl_path}
+                sudo=
+
+                if [[ $EUID -ne 0 ]]; then
+                    if sudo -n true 2>/dev/null; then
+                        echo "passwordless sudo detected"
+                        sudo=sudo
+                        nodepl="$sudo $nodepl"
+                    else
+                        echo "This script must be run as root"
+                        echo "Enable passwordless sudo for this user? (Y/n)"
+                        read x
+                        if [[ $x != 'n' ]]; then
+                            echo "Installing sudo..."
+                            sudo cp /etc/sudoers /var/tmp/sudoers.bak
+                            sudo cp /etc/sudoers /var/tmp/sudoers.new
+                            echo "$USER ALL=(ALL) NOPASSWD: ALL # added by nodepl" | sudo tee -a /var/tmp/sudoers.new
+                            sudo visudo -cf /var/tmp/sudoers.new
+                            if [[ $? = 0 ]]; then
+                                sudo cp /var/tmp/sudoers.new /etc/sudoers
+                                sudo visudo -c
+                            else
+                                echo "Error in new config!"
+                                exit 1
+                            fi
+                        else
+                            exit 1
+                        fi
+                    fi
+                fi
+
+                echo "sudo is $sudo"
+                echo "nodepl is $nodepl"
 
                 if [[ ! -f ~/.ssh/id_rsa ]]; then
                     ssh-keygen;
                 fi;
 
                 echo '{public_key}' > ~/.ssh/authorized_keys
-                chmod u=rw,o=,g= ~/.ssh/id_rsa.pub
+                $sudo chmod u=rw,o=,g= ~/.ssh/id_rsa.pub
+
+                type python
+
+                if [[ $? != 0 ]]; then
+                    echo "Installing python"
+                    $sudo apt-get install python || exit 1
+                fi
+
+                tmp="$(mktemp)"
+                echo '{nodepl_script}' | base64 -d > "$tmp"
+
+                $sudo cp "$tmp" {nodepl_path} || exit 1
+
+                if [[ ! -f "{nodepl_path}" ]]; then
+                    echo "{nodepl_path} not found"
+                    exit 1
+                fi
+
+                $sudo chmod +x {nodepl_path} || exit 1
+
+                $nodepl init test || exit 1
 
                 export DEBIAN_FRONTEND=noninteractive
 
                 if ! type rsyncinit_script_template &>/dev/null; then
-                    {nodepl} package install rsync
+                    $nodepl package install rsync
                 fi;
-
-                {nodepl} package upgrade
             """
         }
         config_file = self.find_config('client')
@@ -173,18 +234,30 @@ class nodepl_client(nodepl):
 class nodepl_core(nodepl_client):
 
     def push(self):
+        self.log_local('notice', 'collecting node information')
+        nodes = []
+        node_defaults = {
+            'username': 'root'
+        }
         for group_name in self.client['groups']:
             group = self.client['groups'][group_name]
             for node_name in group['nodes']:
-                node = group.clone()
+                node = node_defaults.copy()
+                node.update(group)
                 if node_name in self.client['nodes']:
                     node.update(self.client['nodes'])
-                self.run_node(node_name, node)
+                nodes.append({
+                    'name': node_name,
+                    'node': node
+                })
+        self.log_local('notice', 'updating ' + str(len(nodes)) + ' nodes')
+        for node in nodes:
+            self.run_node(node['name'], node['node'])
         return True
 
     def run_node(self, node_name, node):
         host = 'host' in node and node['host'] or node_name
-        ssh_host = 'root@' + host
+        ssh_host = node['username'] + '@' + host
         self.log_local('notice', 'sync node: ' + ssh_host + ' (' + node_name + ')')
         self.log_local('debug', '    roles: ' + ' '.join(node['roles']))
         packages = {}
@@ -205,18 +278,20 @@ class nodepl_core(nodepl_client):
         remote_commands.append(self.client['init-script-template'].format(
             public_key = self.public_key,
             nodepl_script = self.nodepl_script,
-            nodepl = nodepl_path
+            nodepl_path = nodepl_path
         ))
+        remote_commands.append('$nodepl package upgrade')
         for name in packages:
             package = isinstance(packages[name], basestring) and {'status': packages[name]} or packages[name]
             self.log_local('notice', '        package: ' + name + ' ' + package['status'])
-            package_commands.append('{nodepl} package ' + package['status'] + ' ' + name)
+            package_commands.append('$nodepl package ' + package['status'] + ' ' + name)
         for name in services:
             service = isinstance(services[name], basestring) and {'status': services[name]} or services[name]
             self.log_local('notice', '        service: ' + name + ' ' + service['status'])
-            service_commands.append('{nodepl} service ' + service['status'] + ' ' + name)
+            service_commands.append('$nodepl service ' + service['status'] + ' ' + name)
         self.log_local('notice', '    execute remote commands')
-        self.remote_shell(ssh_host, "\n".join(remote_commands + package_commands + service_commands))
+        if not self.remote_shell(ssh_host, "\n".join(remote_commands + package_commands + service_commands)):
+            return False
         remote_commands = []
         self.log_local('notice', '    syncing files...')
         for name in files:
@@ -241,7 +316,8 @@ class nodepl_core(nodepl_client):
                     remote_commands.append(file_info['on_change'])
         # make sure services are running if they depend on any changed files...
         self.log_local('notice', '    execute remote commands')
-        self.remote_shell(ssh_host, "\n".join(remote_commands + service_commands))
+        if not self.remote_shell(ssh_host, "\n".join(remote_commands + service_commands)):
+            return False
         self.log_local('notice', '    done')
 
     # ssh to one or multiple remotes
@@ -294,7 +370,10 @@ class nodepl_service(nodepl):
         return self.status(service) or not 'unrecognized' in self.stderr
 
     def start(self, service):
+        print self.command
+        print service
         if self.is_installed(service) and not self.is_running(service):
+            print ":P::: " + service + 'start'
             return self.shell(self.command + [service, 'start'])
         return None
 
@@ -402,6 +481,11 @@ class nodepl_deploy(nodepl_client):
 
     def remote_version_exists(self, target):
         return False
+
+class nodepl_init(nodepl):
+
+    def test(self):
+        self.log_success('script is ready')
 
 options = {}
 args = []
