@@ -214,6 +214,34 @@ class nodepl_client(nodepl):
         self.client = self.load_config(config_file, defaults, 'client-')
         self.nodepl_script = self.encode_script(sys.argv[0])
         self.public_key = self.load_file(self.client['public-key'])
+        self.init_nodes()
+
+    def init_nodes(self):
+        for group_name in self.client['groups']:
+            group = self.client['groups'][group_name]
+            for node_name in group['nodes']:
+                if not node_name in self.client['nodes']:
+                    self.client['nodes'][node_name] = {}
+        for node_name in self.client['nodes']:
+            node = self.client['nodes'][node_name]
+            self.client['nodes'][node_name] = self.init_node_config(node_name, node)
+
+    def init_node_config(self, node_name, node):
+        config = {
+            'username': 'root'
+        }
+        config.update(node)
+        config['host'] = 'host' in config and config['host'] or node_name
+        config['ssh_host'] = config['username'] + '@' + config['host']
+        return config
+
+    def get_node(self, name):
+        return self.client['nodes'][name]
+
+    def get_node_config(self, name, key, default = False):
+        if name in self.client['nodes'] and key in self.client['nodes'][name]:
+            return self.client['nodes'][name][key]
+        return default
 
     def load_file(self, filename):
         handle = open(filename, 'r')
@@ -247,16 +275,10 @@ class nodepl_core(nodepl_client):
     def push(self):
         self.log_local('notice', 'collecting node information')
         nodes = []
-        node_defaults = {
-            'username': 'root'
-        }
         for group_name in self.client['groups']:
             group = self.client['groups'][group_name]
             for node_name in group['nodes']:
-                node = node_defaults.copy()
-                node.update(group)
-                if node_name in self.client['nodes']:
-                    node.update(self.client['nodes'])
+                node = self.client['nodes'][node_name]
                 nodes.append({
                     'name': node_name,
                     'node': node
@@ -267,8 +289,7 @@ class nodepl_core(nodepl_client):
         return True
 
     def run_node(self, node_name, node):
-        host = 'host' in node and node['host'] or node_name
-        ssh_host = node['username'] + '@' + host
+        ssh_host = node['ssh_host']
         self.log_local('notice', 'sync node: ' + ssh_host + ' (' + node_name + ')')
         self.log_local('debug', '    roles: ' + ' '.join(node['roles']))
         packages = {}
@@ -410,16 +431,6 @@ class nodepl_deploy(nodepl_client):
 
     def __init__(self, options):
         nodepl_client.__init__(self, options)
-        default_config = {
-            'path': '/var/www',
-            'storage': '/var/lib/nodepl/deploy',
-            'user': 'deploy'
-        }
-        for node in self.client['nodes']:
-            node = self.client['nodes'][node]
-            config = 'deploy' in node and node['deploy'] or {}
-            config.update(default_config)
-            node['deploy'] = config
         self.detect_project()
 
     def detect_project(self):
@@ -447,6 +458,8 @@ class nodepl_deploy(nodepl_client):
             os.makedirs(self.cache_path)
         self.log_local('notice', '  name: ' + self.project['name'])
         self.log_local('notice', '  latest version: ' + self.project_version)
+        self.nodes = self.get_nodes()
+        self.log_local('notice', '  active nodes: ' + ' '.join(self.nodes))
 
     def build(self, version = False):
         if version == False:
@@ -460,15 +473,26 @@ class nodepl_deploy(nodepl_client):
         subprocess.call(['du', '-hs', self.cache_path])
         self.log_local('notice', 'cache complete')
 
+    def init_node_config(self, node_name, node):
+        node = nodepl_client.init_node_config(self, node_name, node)
+        config = node
+        deploy_config = {
+            'path': '/var/www',
+            'storage': '/var/lib/nodepl/deploy'
+        }
+        if not 'deploy' in config:
+            config['deploy'] = deploy_config
+        else:
+            config['deploy'].update(deploy_config)
+        return config
+
     def get_nodes(self):
         if self.project['target'] in self.client['groups']:
             return self.client['groups'][self.project['target']]['nodes']
         return [self.project['target']]
 
     def run(self, version = False):
-        nodes = self.get_nodes()
         self.log_local('notice', 'begin deployment to '+ self.project['target'])
-        self.log_local('notice', '  affected nodes are: ' + ' '.join(nodes))
         self.build(version)
         self.sync(version)
         self.deploy(version)
@@ -476,8 +500,33 @@ class nodepl_deploy(nodepl_client):
 
     # @todo Triggers (copy assets, db and other things)
     def sync(self, version):
-        self.log_local('error', 'fix fix fix: sync(self, version):')
+        source = self.cache_path
+        for node_name in self.nodes:
+            node = self.get_node(node_name)
+            dest = node['username'] + '@' + node_name + ':' + node['deploy']['storage'] + '/' + self.project_version
+            self.log_local('notice', 'rsync ' + source + ' => ' + dest)
         # rsync self.cache_path remote_path + hash
+        return
+        for name in files:
+            file_info = isinstance(files[name], basestring) and {'path': files[name]} or files[name]
+            path = file_info['path']
+            source = 'source' in file_info and file_info['source'] or path
+            if os.path.isdir(source) and not source.endswith('/'):
+                source += '/'
+            options = [
+                '-v',
+                #'--progress',
+            ]
+            self.log_local('notice', '        file: ' + name + ' ' + path)
+            self.log_local('notice', '        sync: ' + path + ' from ' + source)
+            if 'delete' in file_info and file_info['delete']:
+                options.append('--delete')
+            if 'recursive' in file_info and file_info['recursive']:
+                options.append('-a')
+            if self.rsync(source, ssh_host + ':' + path, options):
+                if 'on_change' in file_info and file_info['on_change']:
+                    # TODO: run only if something changed...
+                    remote_commands.append(file_info['on_change'])
 
     # @todo Sync deployment with other nodes
     def deploy(self, version):
@@ -485,17 +534,13 @@ class nodepl_deploy(nodepl_client):
         # symlink new version
 
     def status(self):
-        nodes = self.get_nodes()
         self.log_local('notice', 'fetching deployment status from '+ self.project['target'])
-        self.log_local('notice', '  affected nodes are: ' + ' '.join(nodes))
         if True:
             self.log_local('error', 'this project is not deployed on any known servers')
         self.log_local('notice', 'done')
 
     def log(self):
-        nodes = self.get_nodes()
         self.log_local('notice', 'fetching deployment log from '+ self.project['target'])
-        self.log_local('notice', '  affected nodes are: ' + ' '.join(nodes))
         self.log_local('notice', 'done')
 
     def remote_version_exists(self, target):
