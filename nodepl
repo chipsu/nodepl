@@ -49,6 +49,11 @@ class nodepl:
                     config[key[len(options_prefix):]] = self.options[key]
         return config
 
+    def merge_object(self, a, b):
+        a = a.copy()
+        a.update(b)
+        return a
+
     def array_get(self, array, key, default = False):
         return key in array and array[key] or default
 
@@ -113,7 +118,28 @@ class nodepl:
         return self.shell(['ssh', '-t', host, command], silent=silent, popen=False)
 
     def rsync(self, src, dst, options):
+        if os.path.isdir(src) and not src.endswith('/'):
+            src += '/'
         return self.shell(['rsync'] + ['--rsh', 'ssh -c arcfour'] + options + [src, dst], popen=False)
+
+    def rsync_options(self, config, default = None):
+        if default == None:
+            default = {
+                'debug': False,
+                'delete': False,
+                'recursive': True
+            }
+        config = self.merge_object(default, config)
+        options = [
+            #'--progress',
+        ]
+        if self.get_option('debug') or config['debug']:
+            options.append('-v')
+        if 'delete' in config and config['delete']:
+            options.append('--delete')
+        if 'recursive' in config and config['recursive']:
+            options.append('-a')
+        return options
 
     def log_local(self, level, message):
         if level in self.colors:
@@ -222,6 +248,7 @@ class nodepl_client(nodepl):
             for node_name in group['nodes']:
                 if not node_name in self.client['nodes']:
                     self.client['nodes'][node_name] = {}
+                self.client['nodes'][node_name] = self.merge_object(group, self.client['nodes'][node_name])
         for node_name in self.client['nodes']:
             node = self.client['nodes'][node_name]
             self.client['nodes'][node_name] = self.init_node_config(node_name, node)
@@ -270,6 +297,18 @@ class nodepl_client(nodepl):
         print 'Config file not found for: ' + name
         exit(1)
 
+    def begin_remote_commands(self, node):
+        remote_commands = []
+        nodepl_path = self.array_get(node, 'nodepl-path', self.nodepl_path)
+        init_script = self.client['init-script-template'].format(
+            public_key = self.public_key,
+            nodepl_script = self.nodepl_script,
+            nodepl_path = nodepl_path,
+            nodepl_debug = self.get_option('debug')
+        )
+        remote_commands.append(init_script)
+        return remote_commands
+
 class nodepl_core(nodepl_client):
 
     def push(self):
@@ -303,17 +342,9 @@ class nodepl_core(nodepl_client):
                 services.update(role['services'])
             if 'files' in role:
                 files.update(role['files'])
-        remote_commands = []
+        remote_commands = self.begin_remote_commands(node)
         package_commands = []
         service_commands = []
-        nodepl_path = self.array_get(node, 'nodepl-path', self.nodepl_path)
-        init_script = self.client['init-script-template'].format(
-            public_key = self.public_key,
-            nodepl_script = self.nodepl_script,
-            nodepl_path = nodepl_path,
-            nodepl_debug = self.get_option('debug')
-        )
-        remote_commands.append(init_script)
         if not self.get_option('quick'):
             remote_commands.append('$nodepl package upgrade')
         for name in packages:
@@ -327,8 +358,7 @@ class nodepl_core(nodepl_client):
         self.log_local('notice', '    execute remote commands')
         if not self.remote_shell(ssh_host, "\n".join(remote_commands + package_commands + service_commands)):
             return False
-        remote_commands = []
-        remote_commands.append(init_script)
+        remote_commands = self.begin_remote_commands(node)
         self.log_local('notice', '    syncing files...')
         for name in files:
             file_info = isinstance(files[name], basestring) and {'path': files[name]} or files[name]
@@ -427,6 +457,7 @@ class nodepl_service(nodepl):
             return self.shell(self.command + [service, 'reload'])
         return None
 
+# @todo Use threads for content upload
 class nodepl_deploy(nodepl_client):
 
     def __init__(self, options):
@@ -491,56 +522,73 @@ class nodepl_deploy(nodepl_client):
             return self.client['groups'][self.project['target']]['nodes']
         return [self.project['target']]
 
-    def run(self, version = False):
+    def run(self):
         self.log_local('notice', 'begin deployment to '+ self.project['target'])
-        self.build(version)
-        self.sync(version)
-        self.deploy(version)
+        self.build()
+        self.sync()
+        self.deploy()
         self.log_local('notice', 'done')
 
     # @todo Triggers (copy assets, db and other things)
-    def sync(self, version):
+    def sync(self):
         source = self.cache_path
         for node_name in self.nodes:
             node = self.get_node(node_name)
-            dest = node['username'] + '@' + node_name + ':' + node['deploy']['storage'] + '/' + self.project_version
-            self.log_local('notice', 'rsync ' + source + ' => ' + dest)
-        # rsync self.cache_path remote_path + hash
-        return
-        for name in files:
-            file_info = isinstance(files[name], basestring) and {'path': files[name]} or files[name]
-            path = file_info['path']
-            source = 'source' in file_info and file_info['source'] or path
-            if os.path.isdir(source) and not source.endswith('/'):
-                source += '/'
-            options = [
-                '-v',
-                #'--progress',
-            ]
-            self.log_local('notice', '        file: ' + name + ' ' + path)
-            self.log_local('notice', '        sync: ' + path + ' from ' + source)
-            if 'delete' in file_info and file_info['delete']:
-                options.append('--delete')
-            if 'recursive' in file_info and file_info['recursive']:
-                options.append('-a')
-            if self.rsync(source, ssh_host + ':' + path, options):
-                if 'on_change' in file_info and file_info['on_change']:
-                    # TODO: run only if something changed...
-                    remote_commands.append(file_info['on_change'])
+            deploy = node['deploy']
+            remote_path = deploy['storage'] + '/' + self.project_version
+            dest = node['ssh_host'] + ':' + remote_path
+            self.log_local('notice', 'mkdir remote ' + dest)
+            remote_commands = self.begin_remote_commands(node)
+            remote_commands.append('$nodepl_sudo mkdir -p "' + remote_path + '" || exit 1')
+            remote_commands.append('$nodepl_sudo chown -R ' + node['username'] + ': "' + deploy['storage'] + '" || exit 1')
+            if self.remote_shell(node['ssh_host'], "\n".join(remote_commands)):
+                options = self.rsync_options({
+                    'recursive': True,
+                    'delete': True
+                })
+                self.log_local('notice', 'rsync ' + source + ' => ' + dest)
+                self.rsync(source, dest, options)
+            # todo: error handling, all nodes should be ready
+            self.log_local('success', 'version ' + self.project_version + ' uploaded to ' + node_name)
+        self.log_local('success', 'version ' + self.project_version + ' uploaded on all nodes')
 
-    # @todo Sync deployment with other nodes
-    def deploy(self, version):
-        self.log_local('error', 'fix fix fix: deploy(self, version):')
-        # symlink new version
+    # @todo Sync deployment with other nodes (threaded)
+    def deploy(self):
+        # todo: make sure all nodes are ready (sanity check)
+        for node_name in self.nodes:
+            node = self.get_node(node_name)
+            deploy = node['deploy']
+            remote_source = deploy['storage'] + '/' + self.project_version
+            remote_link = deploy['path'] + '/' + self.project['name']
+            self.log_local('notice', 'link ' + remote_link + ' => ' + remote_source)
+            remote_commands = self.begin_remote_commands(node)
+            remote_commands.append('$nodepl_sudo mkdir -p "' + deploy['path'] + '" || exit 11')
+            remote_commands.append('[[ ! -L "' + remote_link + '" && -d "' + remote_link + '" ]] && exit 12')
+            remote_commands.append('$nodepl_sudo ln -sf "' + remote_source + '" "' + remote_link + '" || exit 13')
+            if not self.remote_shell(node['ssh_host'], "\n".join(remote_commands)):
+                self.log_local('error', 'oh noes, todo: rollback other nodes')
+            self.log_local('success', 'version ' + self.project_version + ' deployed on ' + node_name)
+        self.log_local('success', 'version ' + self.project_version + ' deployed on all nodes')
 
     def status(self):
         self.log_local('notice', 'fetching deployment status from '+ self.project['target'])
-        if True:
-            self.log_local('error', 'this project is not deployed on any known servers')
+        for node_name in self.nodes:
+            node = self.get_node(node_name)
+            deploy = node['deploy']
+            remote_link = deploy['path'] + '/' + self.project['name']
+            remote_commands = self.begin_remote_commands(node)
+            remote_commands.append('$nodepl_sudo ls -lha "' + remote_link + '"')
+            self.remote_shell(node['ssh_host'], "\n".join(remote_commands))
         self.log_local('notice', 'done')
 
-    def log(self):
-        self.log_local('notice', 'fetching deployment log from '+ self.project['target'])
+    def history(self):
+        self.log_local('notice', 'fetching deployment history from '+ self.project['target'])
+        for node_name in self.nodes:
+            node = self.get_node(node_name)
+            deploy = node['deploy']
+            remote_commands = self.begin_remote_commands(node)
+            remote_commands.append('$nodepl_sudo ls -lha "' + deploy['storage'] + '"')
+            self.remote_shell(node['ssh_host'], "\n".join(remote_commands))
         self.log_local('notice', 'done')
 
     def remote_version_exists(self, target):
